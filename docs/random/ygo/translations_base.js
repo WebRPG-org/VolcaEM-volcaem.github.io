@@ -23,6 +23,7 @@ export const baseTranslations = {
     ES: ['ES', 'ES'],
     FR: ['FR', 'FR'],
     JP: ['JP', 'JP'],
+	KR: ['KR', 'KR'],
 
     editionAll: ['All Editions', 'Tutte le Edizioni'],
     firstedition: ['First Edition', 'Prima Edizione'],

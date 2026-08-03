@@ -52,7 +52,8 @@ var languageDict = {
     "EN": "🇺🇸",
     "DE": "🇩🇪",
     "FR": "🇫🇷",
-    "JP": "🇯🇵"
+    "JP": "🇯🇵",
+	"KR": "🇰🇷"
 };
 
 // Define shared badge rules (could be moved to a separate module too!)

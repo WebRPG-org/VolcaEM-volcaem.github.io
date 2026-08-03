@@ -59,13 +59,22 @@ import {
     clickHandler,
 } from './common.js';
 
+// Cache globale: filename → src
+const imageSrcCache = new Map();
+// Cache globale: filename → ImageBitmap
+const imageBitmapCache = new Map();
+
+const pendingImagePromises = new Map();
+
 // ---------- FORMAT RULES PER GIOCO ----------
 export const formatRulesByGame = {
     "Yu-Gi-Oh": {
         "Default": { excludeTypes: [], allowedSetCodes: null, languageRule: null },
         "Genesys": { excludeTypes: ["Link", "Pendulum"], allowedSetCodes: null, languageRule: null },
         "GOAT": { excludeTypes: [], allowedSetCodes: null, languageRule: null },
+		"GOAT2EDISON": { excludeTypes: [], allowedSetCodes: null, languageRule: null },
         "Edison": { excludeTypes: [], allowedSetCodes: null, languageRule: null },
+		"Modern": { excludeTypes: [], allowedSetCodes: null, languageRule: null },
         "OCG": { excludeTypes: [], allowedSetCodes: null, languageRule: { type: "only", languages: ["JPN", "JP", "JA", "JAP", "AE", "KOR", "KR", "CHN", "ZH"] } },
         "TCG": { excludeTypes: [], allowedSetCodes: null, languageRule: { type: "exclude", languages: ["JPN", "JP", "JA", "JAP", "AE", "KOR", "KR", "CHN", "ZH"] } }
     },
@@ -109,6 +118,10 @@ export function isCardGoodForFormat(card, game, formatName, formatMap) {
     if (card.rarity.toUpperCase().includes("FAKE") || card.rarity.toUpperCase().includes("FALSA")) {
         return false;
     }
+	
+	if(card.type.toUpperCase().includes("PRODUCT") || card.type.toUpperCase().includes("TOKEN")) {
+		return false;
+	}
 
     // --- OVERRIDE COMPLETO PER EDISON E GOAT ---
     if (game === "Yu-Gi-Oh") {
@@ -119,6 +132,14 @@ export function isCardGoodForFormat(card, game, formatName, formatMap) {
         }
 
         if (formatName === "GOAT") {
+            return formatMap[name] === true;
+        }
+		
+		if (formatName === "GOAT2EDISON") {
+            return formatMap[name] === true;
+        }
+		
+		if (formatName === "Modern") {
             return formatMap[name] === true;
         }
     }
@@ -271,9 +292,102 @@ export function createStealthButton(label, mycards) {
     return btn;
 }
 
+// Funzione ottimizzata senza async/await
+export function getImageSrcForCard(card) {
+    return new Promise((resolve) => {
+        const filename = card.imageFilename;
+        const srcKey = getLocalImagePath(card);
+
+        // 1. Fallback immediato se non c'è filename
+        if (!filename || typeof filename !== "string" || filename.length === 0) {
+            resolve(srcKey);
+            return;
+        }
+
+        // 2. Cache: filename → src
+        if (imageSrcCache.has(filename)) {
+            resolve(imageSrcCache.get(filename));
+            return;
+        }
+
+        // 3. Deduplica: se esiste già una promise in corso
+        if (pendingImagePromises.has(filename)) {
+            pendingImagePromises.get(filename).then(resolve);
+            return;
+        }
+
+        // 4. Deduplica anche per URL identico (nuovo!)
+        if (imageSrcCache.has(srcKey)) {
+            resolve(imageSrcCache.get(srcKey));
+            return;
+        }
+
+        // 5. Caricamento immagine (singola richiesta)
+        const promise = new Promise((res) => {
+            const img = new Image();
+            img.loading = "lazy"; // migliora la percezione
+
+            img.src = srcKey;
+
+            img.onload = () => {
+                // Salva direttamente la src (niente bitmap, niente canvas)
+                imageSrcCache.set(filename, img.src);
+                imageSrcCache.set(srcKey, img.src);
+
+                res(img.src);
+            };
+
+            img.onerror = () => {
+                // Fallback: evita stringa vuota, usa comunque il path locale
+                res(srcKey);
+            };
+        });
+
+        // 6. Memorizza promise per deduplicare richieste concorrenti
+        pendingImagePromises.set(filename, promise);
+
+        // 7. Risoluzione finale
+        promise.then((src) => {
+            pendingImagePromises.delete(filename);
+
+            if (src && src.length > 0 && !imageSrcCache.has(filename)) {
+                imageSrcCache.set(filename, src);
+            }
+
+            resolve(src);
+        });
+    });
+}
+
+// Cache globale per i formati
+const formatCache = {};
+
+async function loadFormat(name) {
+    if (formatCache[name]) return formatCache[name];
+    const response = await fetch(name);
+    const json = await response.json();
+    formatCache[name] = json;
+    return json;
+}
+
+// Pre-normalizzazione dei campi delle carte
+function normalizeCard(card) {
+    card._name = card.name.replace(/\\/g, "");
+    card._rarity = (card.rarity || "").toLowerCase().trim();
+    card._edition = (card.edition || "").replace(/None|NONE/g, "");
+    card._id = (card.id || "").replace(/None|NONE/g, "");
+    card._packId = (card.packId || "").replace(/None|NONE/g, "");
+    card._date = card.dateObtained || "";
+    card._location = card.location || "";
+    card._comments = card.comments || "";
+    return card;
+}
 
 // Display cards in the table.
 export async function displayCards(cards) {
+	
+	cards = cards.map(normalizeCard);
+	
     // Store a copy of the current displayed cards.
     setCurrentDisplayedCards(cards.slice());
 
@@ -285,8 +399,6 @@ export async function displayCards(cards) {
 
     logMessage(`isAndroidApp: ${isAndroidApp()}`);
 
-    let filtered_cards = cards.slice();
-
     const formatSelect = document.getElementById("formatSelect");
     const selectedFormat = formatSelect ? formatSelect.value : "Default";
 
@@ -294,78 +406,116 @@ export async function displayCards(cards) {
 
     if (currentGame === "Yu-Gi-Oh") {
 
-
         if (selectedFormat === "Edison") {
-            const response = await fetch("edison-legal.json");
-            myFormatMap = await response.json();
-            console.log("Edison legal list loaded:", Object.keys(myFormatMap).length, "entries");
+            myFormatMap = await loadFormat("edison-legal.json");
         }
 
         if (selectedFormat === "GOAT") {
-            const response = await fetch("goat-legal.json");
-            myFormatMap = await response.json();
-            console.log("Goat legal list loaded:", Object.keys(myFormatMap).length, "entries");
+            myFormatMap = await loadFormat("goat-legal.json");
         }
 
+        if (selectedFormat === "GOAT2EDISON") {
+            const edisonMap = await loadFormat("edison-legal.json");
+            const goatMap = await loadFormat("goat-legal.json");
 
+            myFormatMap = Object.fromEntries(
+                Object.entries(edisonMap).filter(([name]) => !goatMap[name])
+            );
+        }
+
+        if (selectedFormat === "Modern") {
+            const edisonMap = await loadFormat("edison-legal.json");
+            myFormatMap = {};
+
+            for (const card of cards) {
+                if (!edisonMap[card.name]) {
+                    myFormatMap[card.name] = true;
+                }
+            }
+        }
     }
 
-    filtered_cards = filtered_cards.filter(card =>
+    // -------------------------
+    // FILTRI
+    // -------------------------
+    let filtered_cards = cards.filter(card =>
         isCardGoodForFormat(card, currentGame, selectedFormat, myFormatMap)
     );
 
-    let duplicateCheck = document.getElementById("duplicatesCheckbox");
-    if (duplicateCheck) {
-        let matchingCards;
-        let force_no_duplicates = false;
-
-        if (force_no_duplicates || !duplicateCheck.checked) {
-            // Deduplicate by card.name
-            const seen = new Set();
-            filtered_cards = filtered_cards.filter(card => {
-                if (seen.has(card.name)) {
-                    return false; // skip duplicates
-                }
-                seen.add(card.name);
-                return true; // keep first occurrence
-            });
-        }
+    // Deduplicazione
+    const duplicateCheck = document.getElementById("duplicatesCheckbox");
+    if (!duplicateCheck || !duplicateCheck.checked) {
+        const seen = new Set();
+        filtered_cards = filtered_cards.filter(card => {
+            if (seen.has(card.name)) return false;
+            seen.add(card.name);
+            return true;
+        });
     }
 
-    // Update the result count immediately even if 0 entries.
+    // Aggiorna subito il conteggio
     const resultCountEl = document.getElementById("resultCount");
+
     if (filtered_cards.length === 0) {
         const tr = document.createElement("tr");
         const td = document.createElement("td");
-        td.setAttribute("colspan", "15");
+        td.colSpan = 15;
         td.textContent = translations[langIndex]["nothingfound"];
         tr.appendChild(td);
         tbody.appendChild(tr);
+
         if (resultCountEl) {
-            resultCountEl.textContent = translations[langIndex]["showingentries"].replaceAll("NUMBER", "0");
+            resultCountEl.textContent =
+                translations[langIndex]["showingentries"].replace("NUMBER", "0");
         }
         return;
     }
 
-    // Calculate the unique card names.
-    const uniqueNames = new Set(filtered_cards.map(card => card.name));
+    const uniqueNames = new Set(filtered_cards.map(c => c.name));
+	
+	// -------------------------
+    // IntersectionObserver per immagini
+    // -------------------------
+    const imageObserver = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+            if (!e.isIntersecting) return;
+            const img = e.target;
+            const card = img._card;
 
-    filtered_cards.forEach(card => {
+            getImageSrcForCard(card).then(src => {
+                if (src && src.length > 0) img.src = src;
+                else img.classList.add("image-missing");
+            });
 
-        let nowrap_td = !allowNewlines;
-        let usetall_tr = useTallTr;
-        let usesmall_tr = useSmallTr;
+            imageObserver.unobserve(img);
+        });
+    });
+	
+	// -------------------------
+    // COSTRUZIONE TABELLA (DocumentFragment)
+    // -------------------------
+    const fragment = document.createDocumentFragment();
+
+    const nowrap_td = !allowNewlines;
+    const usetall_tr = useTallTr;
+    const usesmall_tr = useSmallTr;
+
+    const sortBy = document.getElementById("sortBy").value;
+	
+    filtered_cards.forEach((card) => {
 
         const tr = document.createElement("tr");
 
-        if (usetall_tr === true) {
-            tr.classList.add("tall-tr");
-        } else if (usesmall_tr === true) {
-            tr.classList.add("small-tr");
-        }
+        if (usetall_tr) tr.classList.add("tall-tr");
+        if (usesmall_tr) tr.classList.add("small-tr");
+        if (nowrap_td) tr.classList.add("nowrap-td");
+		
+		const imgTd = document.createElement("td");
 
         // Image cell with a set maximum width and error-handling tooltip.
-        const imgTd = document.createElement("td");
+		if (usetall_tr) imgTd.classList.add("tall-tr");
+        if (usesmall_tr) imgTd.classList.add("small-tr");
+        if (nowrap_td) imgTd.classList.add("nowrap-td");
 
         let showImage = document.getElementById("imageth");
 
@@ -374,16 +524,19 @@ export async function displayCards(cards) {
             // showImage.style.display = "block";
 
             imgTd.classList.add("img-cell");
-            if (nowrap_td === true) imgTd.classList.add("nowrap-td");
-            if (usetall_tr === true) imgTd.classList.add("tall-tr");
-            if (usesmall_tr === true) imgTd.classList.add("small-tr");
             const img = document.createElement("img");
-            img.src = getLocalImagePath(card);
+			img.alt = "X";
+			img.loading = "lazy";
 
-            logMessage(`Trying to load image: ${img.src}`);
+			// Placeholder leggerissimo (SVG 1x1)
+			img.src = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMSIgaGVpZ2h0PSIxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxyZWN0IHdpZHRoPSIxIiBoZWlnaHQ9IjEiIGZpbGw9IiNlZWUiLz48L3N2Zz4=";
 
-            // img.alt = card.name;
-            img.alt = "X";
+			// Caricamento reale solo quando l'immagine entra in viewport
+			img._card = card;
+
+			imageObserver.observe(img);
+
+			logMessage(`Trying to load image: ${img.src}`);
 
             function mouseEnterHandler(e) {
                 showOverlay(e, card, img);
@@ -449,16 +602,10 @@ export async function displayCards(cards) {
             imgTd.appendChild(img);
             tr.appendChild(imgTd);
         } else {
-            if (nowrap_td === true) imgTd.classList.add("nowrap-td");
-            if (usetall_tr === true) imgTd.classList.add("tall-tr");
-            if (usesmall_tr === true) imgTd.classList.add("small-tr");
             showImage.style.display = "none";
             showImage.style.width = "0px";
             showImage.style.height = "0px";
         }
-
-        const sortBy = document.getElementById("sortBy")
-            .value;
 
         // Name.
         let tdName = document.createElement("td");
@@ -467,17 +614,11 @@ export async function displayCards(cards) {
             .toLowerCase()) {
             tdName.innerHTML = tdName.textContent + " <b>(" + translations[langIndex]["fake"] + ")</b>";
         }
-        if (nowrap_td === true) tdName.classList.add("nowrap-td");
-        if (usetall_tr === true) tdName.classList.add("tall-tr");
-        if (usesmall_tr === true) tdName.classList.add("small-tr");
         tr.appendChild(tdName);
 
         // Type.
         let tdType = document.createElement("td");
         tdType.innerHTML = getTypeDisplay(card.type);
-        if (nowrap_td === true) tdType.classList.add("nowrap-td");
-        if (usetall_tr === true) tdType.classList.add("tall-tr");
-        if (usesmall_tr === true) tdType.classList.add("small-tr");
         tr.appendChild(tdType);
 
         // Rarity.
@@ -502,18 +643,12 @@ export async function displayCards(cards) {
 
         //if (card.name.includes("Esosorelle")) console.log(tdRarity.innerHTML + " because " + card.rarity.toLowerCase().trim().replaceAll(" ", "") + " is " + translations[langIndex][card.rarity.toLowerCase().trim().replaceAll(" ", "")]);
 
-        if (nowrap_td === true) tdRarity.classList.add("nowrap-td");
-        if (usetall_tr === true) tdRarity.classList.add("tall-tr");
-        if (usesmall_tr === true) tdRarity.classList.add("small-tr");
         tr.appendChild(tdRarity);
 
         // Quality badge.
         let tdQuality = document.createElement("td");
         tdQuality.innerHTML = getQualityBadge(sellerMode && card.quality === "Unknown (good)" ? "Moderately Played" : card.quality)
             .replaceAll("None", "");
-        if (nowrap_td === true) tdQuality.classList.add("nowrap-td");
-        if (usetall_tr === true) tdQuality.classList.add("tall-tr");
-        if (usesmall_tr === true) tdQuality.classList.add("small-tr");
         tr.appendChild(tdQuality);
 
         // Language badge.
@@ -521,17 +656,11 @@ export async function displayCards(cards) {
         tdLanguage.innerHTML = getLanguageBadge(card.language)
             .replaceAll("None", "")
             .replaceAll("NONE", "");
-        if (nowrap_td === true) tdLanguage.classList.add("nowrap-td");
-        if (usetall_tr === true) tdLanguage.classList.add("tall-tr");
-        if (usesmall_tr === true) tdLanguage.classList.add("small-tr");
         tr.appendChild(tdLanguage);
 
         // Edition badge.
         let tdEdition = document.createElement("td");
         tdEdition.innerHTML = getEditionBadge(card.edition.replaceAll("None", ""));
-        if (nowrap_td === true) tdEdition.classList.add("nowrap-td");
-        if (usetall_tr === true) tdEdition.classList.add("tall-tr");
-        if (usesmall_tr === true) tdEdition.classList.add("small-tr");
         tr.appendChild(tdEdition);
 
         let have_min_price = false;
@@ -544,9 +673,6 @@ export async function displayCards(cards) {
         // Price I Paid.
         let tdPricePaid = document.createElement("td");
         tdPricePaid.textContent = card.pricePaid.toFixed(2);
-        if (nowrap_td === true) tdPricePaid.classList.add("nowrap-td");
-        if (usetall_tr === true) tdPricePaid.classList.add("tall-tr");
-        if (usesmall_tr === true) tdPricePaid.classList.add("small-tr");
         if (sellerMode) {
             tdPricePaid.style.height = "0px";
             tdPricePaid.style.width = "0px";
@@ -567,18 +693,12 @@ export async function displayCards(cards) {
         } else {
             tdMarketPrice.textContent = card.marketPrice;
         }
-        if (nowrap_td === true) tdMarketPrice.classList.add("nowrap-td");
-        if (usetall_tr === true) tdMarketPrice.classList.add("tall-tr");
-        if (usesmall_tr === true) tdMarketPrice.classList.add("small-tr");
         tr.appendChild(tdMarketPrice);
 
         // ID.
         let tdID = document.createElement("td");
         tdID.textContent = card.id.replaceAll("None", "")
             .replaceAll("NONE", "");
-        if (nowrap_td === true) tdID.classList.add("nowrap-td");
-        if (usetall_tr === true) tdID.classList.add("tall-tr");
-        if (usesmall_tr === true) tdID.classList.add("small-tr");
         tr.appendChild(tdID);
 
         // Pack ID
@@ -589,15 +709,12 @@ export async function displayCards(cards) {
         tdPackID.style.width = "0px";
         tdPackID.style.display = "none";
         tdPackID.style.opacity = "0%";
-        if (nowrap_td === true) tdPackID.classList.add("nowrap-td");
-        if (usetall_tr === true) tdPackID.classList.add("tall-tr");
-        if (usesmall_tr === true) tdPackID.classList.add("small-tr");
         tr.appendChild(tdPackID);
 
         const skip_before_2020 = false;
         const skip_before_specific_date = false; // NEW optional flag
         //const cutoffDate = new Date(2025, 10, 4); // JS months are 0‑indexed → 10 = November
-        const cutoffDate = new Date(2026, 4, 3); // JS months are 0‑indexed → 10 = November
+        const cutoffDate = new Date(2026, 7, 1); // JS months are 0‑indexed → 10 = November
 
         // Date Obtained.
         if (card.dateObtained) {
@@ -625,9 +742,6 @@ export async function displayCards(cards) {
 
         let tdDate = document.createElement("td");
         tdDate.textContent = card.dateObtained;
-        if (nowrap_td === true) tdDate.classList.add("nowrap-td");
-        if (usetall_tr === true) tdDate.classList.add("tall-tr");
-        if (usesmall_tr === true) tdDate.classList.add("small-tr");
         if (sellerMode) {
             tdDate.style.height = "0px";
             tdDate.style.width = "0px";
@@ -644,9 +758,6 @@ export async function displayCards(cards) {
         // Location.
         let tdLocation = document.createElement("td");
         tdLocation.textContent = card.location;
-        if (nowrap_td === true) tdLocation.classList.add("nowrap-td");
-        if (usetall_tr === true) tdLocation.classList.add("tall-tr");
-        if (usesmall_tr === true) tdLocation.classList.add("small-tr");
         if (sellerMode) {
             tdLocation.style.height = "0px";
             tdLocation.style.width = "0px";
@@ -696,18 +807,8 @@ export async function displayCards(cards) {
 
         tr.appendChild(tdComments);
 
-
-
-        if (nowrap_td === true) tdComments.classList.add("nowrap-td");
-        if (usetall_tr === true) tdComments.classList.add("tall-tr");
-        if (usesmall_tr === true) tdComments.classList.add("small-tr");
-        tr.appendChild(tdComments);
-
         // Wiki button.
         let tdWiki = document.createElement("td");
-        if (nowrap_td === true) tdWiki.classList.add("nowrap-td");
-        if (usetall_tr === true) tdWiki.classList.add("tall-tr");
-        if (usesmall_tr === true) tdWiki.classList.add("small-tr");
         if (card.wikiUrl && card.wikiUrl.length > 0) {
             let wikiBtn = document.createElement("button");
             wikiBtn.textContent = translations[langIndex]["go"];
@@ -728,8 +829,10 @@ export async function displayCards(cards) {
 
         tr.appendChild(tdWiki);
 
-        tbody.appendChild(tr);
+        fragment.appendChild(tr);
     });
+	
+	tbody.appendChild(fragment);
 
     setCurrentDisplayedCards(filtered_cards.slice());
 

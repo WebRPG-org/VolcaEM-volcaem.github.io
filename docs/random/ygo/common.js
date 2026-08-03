@@ -178,6 +178,10 @@ export function displayCardDetails(cards) {
 
         // Use the first card's common details
         const commonCard = cards[0];
+		// Compute total spent and number of copies
+		const totalPaid = cards.reduce((sum, c) => sum + (c.pricePaid || 0), 0);
+		const copyCount = cards.length;
+
 
         // Collect all unique IDs and Pack IDs
         const allIds = [...new Set(cards.map(c => c.id))].join(", ");
@@ -192,6 +196,10 @@ export function displayCardDetails(cards) {
         <div class="detail-row"><span class="detail-label">Type:</span> ${getTypeDisplay(commonCard.type)}</div>
         <div class="detail-row"><span class="detail-label">IDs:</span> ${allIds}</div>
         <div class="detail-row"><span class="detail-label">Pack IDs:</span> ${allPackIds}</div>
+		<div class="detail-row">
+		  <span class="detail-label">Total Paid:</span> €${totalPaid.toFixed(2)} for ${copyCount} copies
+		</div>
+		<br>
         ${
           commonCard.wikiUrl
             ? '<div class="detail-row"><button onclick="window.open(\'' +
